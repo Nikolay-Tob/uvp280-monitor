@@ -66,8 +66,12 @@ jobs:
           name: UVP280Monitor
           path: dist/UVP280Monitor.exe
 
-      - name: Публикация релиза
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Публикация в Releases (последняя сборка)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: latest
+          name: Последняя сборка
+          target_commitish: ${{ github.sha }}
+          body: Автоматическая сборка из ветки main. Скачайте UVP280Monitor.exe и запустите.
           files: dist/UVP280Monitor.exe
