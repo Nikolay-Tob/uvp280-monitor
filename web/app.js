@@ -17,6 +17,25 @@ function toast(msg, err) {
   d.textContent = msg; if (err) d.className = 'err'; t.appendChild(d);
   setTimeout(() => d.remove(), err ? 7000 : 3500);
 }
+function confirmDlg(title, html, okText = 'Записать') {
+  return new Promise(res => {
+    const d = document.createElement('div'); d.className = 'dlg';
+    d.innerHTML = `<div><h3>${esc(title)}</h3><div>${html}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="dn">Отмена</button><button class="pri dy">${esc(okText)}</button></div></div>`;
+    document.body.appendChild(d);
+    const done = v => { d.remove(); res(v); };
+    d.querySelector('.dn').onclick = () => done(false); d.querySelector('.dy').onclick = () => done(true);
+    d.onclick = e => { if (e.target === d) done(false); };
+  });
+}
+async function callW(d, path, body, text, okText) {
+  if (text && !await confirmDlg('Подтвердите действие · «' + d.name + '»', text, okText)) return null;
+  try { return await api('device/' + d.id + '/' + path, body || {}); } catch (e) { toast(e.message, true); return null; }
+}
+async function writeItems(d, items, text) {
+  const j = await callW(d, 'write', { items }, text);
+  if (j) toast('Записано');
+  return j;
+}
 function store(k, v) { try { if (v === undefined) return JSON.parse(localStorage.getItem('uvp.' + k)); localStorage.setItem('uvp.' + k, JSON.stringify(v)); } catch (e) { return null; } }
 
 /* ---------------- единицы измерения (значения прибора — в СИ) ---------------- */
@@ -33,6 +52,7 @@ const UNITS = {
   enthalpy: { def: 'кДж/кг', list: [['кДж/кг', v => v / 1e3, 3], ['Дж/кг', v => v, 0]], title: 'Энтальпия' },
 };
 function unitSel(q) { const s = store('units') || {}; const u = UNITS[q]; return u.list.find(x => x[0] === s[q]) || u.list.find(x => x[0] === u.def) || u.list[0]; }
+function fv(v) { return v == null ? '' : String(+Number(v).toPrecision(7)); }
 function nf(v, d) { return v.toLocaleString('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: d }); }
 function num(v, d = 3) { return v == null ? '—' : nf(v, d); }
 function secs(v) { if (v == null) return '—'; v = Math.max(0, v | 0); const h = Math.floor(v / 3600), m = Math.floor(v % 3600 / 60), s = v % 60; return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0'); }
@@ -47,7 +67,7 @@ function qnum(qty, v) { return v == null ? '—' : (UNITS[qty] ? nf(unitSel(qty)
 
 /* ---------------- состояние ---------------- */
 const S = { devices: [], dev: null, route: { name: 'summary' }, screen: null, version: '' };
-const TABS = [['main', 'Главная'], ['pipes', 'Трубопроводы'], ['sensors', 'Датчики'], ['oil', 'Учёт нефти'], ['archive', 'Архивы'], ['settings', 'Настройки']];
+const TABS = [['main', 'Главная'], ['pipes', 'Трубопроводы'], ['sensors', 'Датчики'], ['env', 'Параметры среды'], ['oil', 'Учёт нефти'], ['archive', 'Архивы'], ['settings', 'Настройки']];
 
 function parseRoute() {
   const p = (location.hash || '#/summary').slice(2).split('/').map(decodeURIComponent);
@@ -208,8 +228,35 @@ const Dev = {
 const DevTabs = {};
 
 DevTabs.main = {
-  mount(root) { root.innerHTML = `<section class="grid" id="m1"></section><section id="m2" style="display:flex;flex-direction:column;gap:12px"></section>`; },
+  mount(root) { root.innerHTML = `<section class="grid" id="m1"></section><section id="m3"></section><section id="m2" style="display:flex;flex-direction:column;gap:12px"></section>`; this.sig = ''; },
+  timeCtl(d) {
+    const sig = [d.write, d.caps && d.caps.ntp, (d.ntp || {}).ip || ''].join('|');
+    if (sig === this.sig) return; this.sig = sig;
+    const el = $('#m3'); if (!el) return;
+    if (!d.write) { el.innerHTML = `<div class="box small">Управление временем и NTP выключено (режим «только просмотр»). Включается на вкладке «Настройки» → «Разрешить запись».</div>`; return; }
+    el.innerHTML = `<article class="card"><h2>Управление временем</h2>
+      <div class="small muted">Часы прибора по Modbus только читаются: время подводится через NTP или поправкой до ±99 с за раз. Авторизация не нужна.</div>
+      <div class="frm"><button id="t-sync">Подвести по времени этого ПК</button>
+        <label class="f">Поправка, секунд (−99…99)<input type="number" id="t-c" min="-99" max="99" value="1" style="width:130px"></label><button id="t-cb">Применить поправку</button></div>
+      ${d.caps && d.caps.ntp ? `<div class="frm"><label class="f">IP-адрес NTP-сервера<input id="ntp-ip" value="${esc((d.ntp || {}).ip || '')}" style="width:170px" placeholder="192.168.0.1"></label>
+        <button id="ntp-save">Записать адрес</button><button id="ntp-force">Синхронизировать сейчас</button><button id="ntp-auto">Включить автосинхронизацию</button></div>` : ''}
+    </article>`;
+    const run = async (path, body, text, ok) => { const j = await callW(d, path, body, text, ok); if (j) { toast('Готово'); refresh(); } return j; };
+    $('#t-sync').onclick = async () => {
+      if (!await confirmDlg('Подвести часы по ПК', 'Часы прибора будут переведены шагами до ±99 с на время этого компьютера. Это изменяет время в архивах прибора. Продолжить?', 'Подвести')) return;
+      const b = $('#t-sync'); b.disabled = true; b.textContent = 'Подвожу…';
+      try { const j = await api('device/' + d.id + '/time/sync-pc', {}); toast(j.ok ? 'Часы подведены, шагов: ' + j.steps.length : 'Не удалось подвести часы за отведённое число шагов', !j.ok); } catch (e) { toast(e.message, true); }
+      b.disabled = false; b.textContent = 'Подвести по времени этого ПК'; refresh();
+    };
+    $('#t-cb').onclick = () => { const v = +$('#t-c').value; if (!v || Math.abs(v) > 99) return toast('Поправка от 1 до 99 секунд', true); run('time/correct', { seconds: v }, `Перевести часы прибора на ${v > 0 ? 'вперёд' : 'назад'} на ${Math.abs(v)} с?`, 'Перевести'); };
+    const ni = $('#ntp-save'); if (ni) {
+      ni.onclick = () => run('ntp/ip', { ip: $('#ntp-ip').value }, `Записать адрес NTP-сервера ${esc($('#ntp-ip').value)}?`);
+      $('#ntp-force').onclick = () => run('ntp/force', {}, 'Принудительно синхронизировать часы прибора с NTP-сервером?', 'Синхронизировать');
+      $('#ntp-auto').onclick = () => run('ntp/auto', {}, 'Включить автоматическую синхронизацию (при расхождении более 5 с)?', 'Включить');
+    }
+  },
   update(root, d) {
+    this.timeCtl(d);
     if (!d.online && !d.clock) { $('#m1').innerHTML = `<div class="card"><div class="box bad">${esc(d.error || 'Подключение к прибору…')}</div></div>`; $('#m2').innerHTML = ''; return; }
     const n = d.ntp, info = d.info || {};
     const dc = diffCls(d.diff);
@@ -231,8 +278,7 @@ DevTabs.main = {
     <article class="card"><div class="row"><h2>Время прибора</h2><span class="pill ${dc}">${d.diff == null ? '' : Math.abs(d.diff) <= 5 ? 'в допуске ±5 с' : 'расхождение ' + diffText(d.diff)}</span></div>
       <div><div class="big mono">${fmtTime(d.clock)}</div><div class="muted">${esc(fmtDate(d.clock))}</div></div>
       <div class="two"><div><div class="l">Время этого ПК</div><div class="v mono">${fmtTime(d.pc_time)}</div></div><div><div class="l">Прибор − ПК</div><div class="v mono">${diffText(d.diff)}</div></div></div>
-      ${ntp}
-      <div class="small muted">Установка времени и настройка NTP появятся в следующей версии (потребуется вход под пользователем).</div></article>
+      ${ntp}</article>
     <article class="card"><h2>Состояние</h2>
       ${errs.length ? `<div class="box ${errs.some(p => p.crit >= 3) ? 'bad' : 'warn'}"><b>Ошибки на трубопроводах: ${errs.reduce((a, p) => a + (p.n_err || 0), 0)}</b>${errs.map(p => `<div><a style="text-decoration:underline" href="#/d/${encodeURIComponent(d.id)}/pipes/${p.tp}">${esc(p.name)}</a> — ошибок: ${p.n_err}, критичность ${p.crit}</div>`).join('')}</div>` : `<div class="box ok">Ошибок на трубопроводах нет</div>`}
       <dl class="kv"><dt>Уровень доступа</dt><dd>${esc(level)}</dd>
@@ -358,7 +404,7 @@ DevTabs.oil = {
     root.innerHTML = `<div class="grid" id="og"></div>
     <div class="card"><div class="row"><h2>Итоги закончившихся периодов</h2><div class="seg" id="seg"><span data-k="hour" class="on">Час / 2 часа</span><span data-k="shift">Смена</span><span data-k="day">Сутки</span></div></div>
       <div class="small muted">Прибор формирует часовой или двухчасовой отчёт в зависимости от настройки — реальный период указан во времени начала и конца.</div><div id="op"></div></div>
-    <details class="card"><summary style="cursor:pointer"><b>Управление СИКН, коэффициенты плотности и К-факторы</b> <span class="small muted">(только просмотр)</span></summary><div class="grid" id="ok" style="margin-top:12px"></div></details>`;
+    <details class="card"><summary style="cursor:pointer"><b>Управление СИКН, коэффициенты плотности и К-факторы</b> </summary><div class="grid w" id="ok" style="margin-top:12px"></div></details>`;
     $('#seg').onclick = e => { const k = e.target.dataset.k; if (!k) return; this.period = k; [...$('#seg').children].forEach(s => s.classList.toggle('on', s.dataset.k === k)); this.loadPeriod(); };
     this.loadPeriod(); this.timer = setInterval(() => { if (S.route.tab === 'oil') this.loadPeriod(); else clearInterval(this.timer); }, 15000);
     this.loadControl();
@@ -379,18 +425,52 @@ DevTabs.oil = {
     try { const j = await api('device/' + S.dev.id + '/oil/control'); this.ctl = j; this.renderControl(); } catch (e) { }
   },
   renderControl() {
-    const j = this.ctl; if (!j || !$('#ok')) return;
+    const j = this.ctl, d = S.dev; const el = $('#ok'); if (!j || !el || !d) return;
+    const canW = !!d.write && d.level === 2;
+    const note = !d.write ? 'Изменение выключено (режим «только просмотр»): включается на вкладке «Настройки».' : d.level !== 2 ? 'Для изменения нужен вход под пользователем с уровнем «Наладчик» (вкладка «Настройки») и освобождённый ключ безопасности.' : '';
+    const inp = (a, v, w = 110) => `<input data-a="${a}" value="${fv(v)}" ${canW ? '' : 'disabled'} style="width:${w}px;text-align:right"> ${canW ? `<button data-s="${a}">Записать</button>` : ''}`;
+    const etab = rows => `<table><tbody>${rows.filter(r => r.value != null).map(r => `<tr><td>${esc(r.label)}</td><td class="n">${inp(r.addr, r.value)}</td></tr>`).join('') || '<tr><td class="muted">нет данных</td></tr>'}</tbody></table>`;
+    let h = note ? `<div class="box warn" style="grid-column:1/-1">${esc(note)}</div>` : '';
     const mask = j.line_mask;
-    let h = '';
-    if (mask != null) h += `<article class="card"><h2>Управление СИКН</h2><dl class="kv"><dt>Маска отключённых линий</dt><dd class="mono">${mask}</dd>
-      <dt>Отключены линии</dt><dd>${[1, 2, 3, 4].filter(n => mask >> (n - 1) & 1).join(', ') || 'нет'}</dd>
-      <dt>Резервный канал влагомера</dt><dd>${mask & 64 ? 'используется' : 'нет'}</dd></dl><div class="small muted">Изменение доступно только в режиме «Наладчик» — появится в следующей версии.</div></article>`;
-    if (j.dens && j.dens.length) h += `<article class="card"><h2>Коэффициенты плотности</h2>${oilTable(j.dens)}</article>`;
-    for (const k of (j.kfactors || [])) h += `<article class="card"><h2>К-факторы · ${esc(k.title)}</h2>${oilTable(k.rows)}</article>`;
-    $('#ok').innerHTML = h;
+    if (mask != null) h += `<article class="card"><h2>Линии СИКН</h2>
+      ${[1, 2, 3, 4].map(n => `<label class="small"><input type="checkbox" class="lm" data-b="${n - 1}" ${mask >> (n - 1) & 1 ? 'checked' : ''} ${canW ? '' : 'disabled'}> линия ${n} отключена</label>`).join('')}
+      <label class="small"><input type="checkbox" class="lm" data-b="6" ${mask & 64 ? 'checked' : ''} ${canW ? '' : 'disabled'}> использовать резервный канал влагомера</label>
+      ${canW ? '<button id="lm-save">Записать маску линий</button>' : ''}</article>`;
+    const kmh = d.kmh;
+    if (kmh) h += `<article class="card"><h2>КМХ · управление</h2><table><tbody>
+      <tr><td>Эталонная линия (№ ТП)</td><td class="n">${inp(18000, kmh.ref_pipe, 70)}</td></tr>
+      <tr><td>Контролируемая линия (№ ТП)</td><td class="n">${inp(18001, kmh.ctl_pipe, 70)}</td></tr>
+      <tr><td>Импульсы эталона / время, мин</td><td class="n">${inp(18002, kmh.param, 100)}</td></tr>
+      <tr><td>Выполнено КМХ (счётчик)</td><td class="n">${inp(18004, kmh.count, 100)}</td></tr></tbody></table>
+      ${canW ? '<div class="frm"><button class="pri" id="kmh-go">Запустить КМХ</button><button class="dng" id="kmh-stop">Прервать КМХ</button></div>' : ''}</article>`;
+    for (const sm of (d.sampler || [])) if (sm.mode === 100 || sm.mode === 200) h += `<article class="card"><h2>Пробоотборник · ${sm.name}</h2><table><tbody>
+      <tr><td>Режим (только чтение)</td><td class="n">${esc(sm.mode_text)}</td></tr>
+      <tr><td>Длительность импульса, мс</td><td class="n">${inp(sm.base + 1, sm.pulse_ms, 90)}</td></tr>
+      <tr><td>Количество проб</td><td class="n">${inp(sm.base + 2, sm.count, 90)}</td></tr>
+      <tr><td>${sm.mode === 200 ? 'Масса на импульс' : 'Период, с'}</td><td class="n">${inp(sm.base + 4, sm.period, 90)}</td></tr></tbody></table>
+      <div class="small muted">Запись количества или периода перезапускает счётчик проб.</div></article>`;
+    if (j.dens && j.dens.length) h += `<article class="card"><h2>Коэффициенты плотности</h2>${etab(j.dens)}</article>`;
+    for (const k of (j.kfactors || [])) h += `<article class="card"><h2>К-факторы · ${esc(k.title)}</h2>${etab(k.rows)}</article>`;
+    el.innerHTML = h;
+    const after = async () => { await refresh(); this.loadControl(); };
+    el.querySelectorAll('[data-s]').forEach(b => b.onclick = async () => {
+      const i = el.querySelector(`input[data-a="${b.dataset.s}"]`); const v = parseFloat(String(i.value).replace(',', '.'));
+      if (isNaN(v)) return toast('Введите число', true);
+      const lab = i.closest('tr') ? i.closest('tr').firstElementChild.textContent.trim() : 'регистр ' + b.dataset.s;
+      const r = await writeItems(d, [{ addr: +b.dataset.s, value: v }], `Записать «${esc(lab)}» = <b>${v}</b> (рег. ${b.dataset.s})?`);
+      if (r) after();
+    });
+    const ms = $('#lm-save'); if (ms) ms.onclick = async () => {
+      let m = 0; el.querySelectorAll('.lm').forEach(c => { if (c.checked) m |= 1 << +c.dataset.b; });
+      const r = await writeItems(d, [{ addr: 17100, value: m }], `Записать маску линий СИКН = <b>${m}</b>? Отключённые линии перестанут учитываться в СИКН.`); if (r) after();
+    };
+    const go = $('#kmh-go'); if (go) go.onclick = async () => { const r = await writeItems(d, [{ addr: 18006, value: 123456 }], 'Запустить процедуру КМХ с текущими настройками?'); if (r) after(); };
+    const st = $('#kmh-stop'); if (st) st.onclick = async () => { const r = await writeItems(d, [{ addr: 18006, value: 234567 }], 'Прервать выполняющуюся процедуру КМХ?'); if (r) after(); };
   },
   update(root, d) {
     const og = $('#og'); if (!og) return;
+    const csig = [d.write, d.level, !!d.kmh, (d.sampler || []).length].join('|');
+    if (csig !== this.csig) { this.csig = csig; this.renderControl(); }
     const groups = d.oil_groups;
     if (!groups) { og.innerHTML = '<div class="card muted">Чтение данных нефтяного узла…</div>'; return; }
     let h = groups.map(g => `<article class="card"><h2>${esc(g.title)}</h2>${oilTable(g.rows)}</article>`).join('');
@@ -399,7 +479,7 @@ DevTabs.oil = {
       const prog = (kmh.rows.find(r => r.addr === 18046) || {}).value;
       h += `<article class="card"><h2>КМХ</h2><dl class="kv"><dt>Эталонная линия</dt><dd class="mono">ТП${kmh.ref_pipe ?? '—'}</dd><dt>Контролируемая линия</dt><dd class="mono">ТП${kmh.ctl_pipe ?? '—'}</dd>
         <dt>Выполнено КМХ</dt><dd class="mono">${kmh.count ?? '—'}</dd><dt>Ход текущего КМХ</dt><dd class="mono">${prog == null ? '—' : num(prog, 1) + ' %'}</dd></dl>
-        ${oilTable(kmh.rows.filter(r => r.addr !== 18046))}<div class="small muted">Запуск и прерывание КМХ — в следующей версии (потребуется «Наладчик»).</div></article>`;
+        ${oilTable(kmh.rows.filter(r => r.addr !== 18046))}<div class="small muted">Запуск и параметры КМХ — в блоке «Управление СИКН…» ниже.</div></article>`;
     }
     for (const s of (d.sampler || [])) h += `<article class="card"><h2>Пробоотборник · ${s.name}</h2><dl class="kv"><dt>Режим</dt><dd>${esc(s.mode_text)}</dd><dt>Длительность импульса</dt><dd class="mono">${s.pulse_ms} мс</dd>
       <dt>Осталось проб</dt><dd class="mono">${s.count ?? '—'}</dd><dt>${s.mode === 200 ? 'Масса на импульс' : 'Период, с'}</dt><dd class="mono">${num(s.period, 3)}</dd></dl></article>`;
@@ -461,18 +541,65 @@ DevTabs.archive = {
   update() { }
 };
 
+/* ---- параметры среды ---- */
+DevTabs.env = {
+  mount(root, d) {
+    root.innerHTML = `<div class="row"><div class="meta">Параметры среды (рег. 1000–1532). Показаны только те разделы, которые отдаёт этот прибор. Читаются и меняются без авторизации.</div><button id="e-rf">Обновить</button></div><div id="e-body" class="grid w"></div>`;
+    $('#e-rf').onclick = () => this.load(d);
+    this.load(d);
+  },
+  async load(d) {
+    const el = $('#e-body'); if (!el) return;
+    el.innerHTML = '<div class="card muted">Чтение параметров из прибора…</div>';
+    try {
+      const j = await api('device/' + d.id + '/env');
+      const canW = (S.dev || d).write;
+      el.innerHTML = j.sections.map(sec => `<article class="card"><h2>${esc(sec.title)}</h2><table><tbody>${sec.rows.map(r => `<tr><td>${esc(r.label)}${r.unit ? ' <span class="muted small">(' + esc(r.unit) + ')</span>' : ''}</td>
+        <td class="n">${canW && !r.ro ? `<input data-a="${r.addr}" data-t="${r.type}" data-l="${esc(r.label)}" value="${fv(r.value)}" style="width:110px;text-align:right"> <button data-s="${r.addr}">Записать</button>` : (r.value == null ? '—' : num(r.value, 5))}</td></tr>`).join('')}</tbody></table></article>`).join('') || '<div class="card muted">Прибор не отдаёт параметры среды.</div>';
+      el.querySelectorAll('[data-s]').forEach(b => b.onclick = async () => {
+        const inp = el.querySelector(`input[data-a="${b.dataset.s}"]`); const v = parseFloat(String(inp.value).replace(',', '.'));
+        if (isNaN(v)) return toast('Введите число', true);
+        const dd = S.dev || d;
+        const j = await writeItems(dd, [{ addr: +inp.dataset.a, value: v }], `Записать «${esc(inp.dataset.l)}» = <b>${v}</b>?`);
+        if (j && j.written[0].value != null) inp.value = fv(j.written[0].value);
+      });
+    } catch (e) { el.innerHTML = `<div class="card"><div class="box bad">${esc(e.message)}</div></div>`; }
+  },
+  update() { }
+};
+
 /* ---- настройки прибора ---- */
 DevTabs.settings = {
-  mount(root, d) { },
+  mount(root, d) { this.sig = ''; root.innerHTML = '<div id="st"></div>'; },
   update(root, d) {
     const info = d.info || {};
-    root.innerHTML = `<div class="grid"><article class="card"><h2>Режим работы</h2><div class="box">Версия 0.1 работает только на чтение: запись параметров, времени и управление (КМХ, пробоотборник, линии СИКН) включаются отдельным шагом, с входом под пользователем и подтверждением каждой записи.</div>
-      <dl class="kv"><dt>Уровень доступа сейчас</dt><dd>${esc(d.level_text || '—')}</dd></dl></article>
-      <article class="card"><h2>Диагностика</h2><dl class="kv"><dt>Адресация</dt><dd class="mono">смещение ${info.offset ?? 0}</dd><dt>Порядок байт</dt><dd class="mono">${esc(info.order || '')}</dd>
+    const sig = [d.write, d.level_text, d.online].join('|');
+    const dyn = `<dl class="kv"><dt>Адресация</dt><dd class="mono">смещение ${info.offset ?? 0}</dd><dt>Порядок байт</dt><dd class="mono">${esc(info.order || '')}</dd>
       <dt>Сообщает прибор (HR100/101)</dt><dd class="mono">${esc(info.order_hint || '—')}</dd><dt>Маска трубопроводов</dt><dd class="mono">0x${(info.mask || 0).toString(16).toUpperCase().padStart(4, '0')}</dd>
-      <dt>Формат года в часах</dt><dd class="mono">${d.year4 ? '4 цифры' : '2 цифры'}</dd><dt>Ошибок связи за сеанс</dt><dd class="mono">${d.errors_total ?? 0}</dd></dl>
-      <button id="rd">Определить прибор заново</button></article></div>`;
-    const b = $('#rd'); if (b) b.onclick = async () => { await api('device/' + d.id + '/refresh', {}); toast('Прибор будет определён заново'); };
+      <dt>Формат года в часах</dt><dd class="mono">${d.year4 ? '4 цифры' : '2 цифры'}</dd><dt>Ошибок связи за сеанс</dt><dd class="mono">${d.errors_total ?? 0}</dd></dl>`;
+    if (sig === this.sig) { const x = $('#st-dyn'); if (x) x.innerHTML = dyn; return; }
+    this.sig = sig;
+    $('#st').innerHTML = `<div class="grid"><article class="card"><h2>Режим работы</h2>
+      <div class="box ${d.write ? 'warn' : 'ok'}">${d.write ? '<b>Запись разрешена.</b> Все изменения подтверждаются отдельным окном.' : '<b>Только просмотр.</b> Любые записи в прибор заблокированы.'}</div>
+      <label class="small"><input type="checkbox" id="wm" ${d.write ? 'checked' : ''}> Разрешить запись в этот прибор</label>
+      <div class="small muted">Включайте только на время работы: через запись меняются параметры среды, время и управление узлом учёта.</div></article>
+      <article class="card"><h2>Вход под пользователем</h2>
+      <div class="row"><span>Уровень доступа сейчас</span><b>${esc(d.level_text || '—')}</b></div>
+      ${d.write ? `<div class="frm"><label class="f">Пользователь (1–5)<input type="number" id="lg-u" min="1" max="5" value="1" style="width:110px"></label>
+        <label class="f">Пароль<input type="password" id="lg-p" autocomplete="off" style="width:170px"></label><button class="pri" id="lg-in">Войти</button><button id="lg-out">Выйти</button></div>
+        <div class="small muted">Пароль не сохраняется. Прибор принимает новый пароль не чаще раза в 30 с. Для управления узлом учёта нужен уровень «Наладчик» и освобождённый ключ безопасности.</div>` : '<div class="small muted">Включите запись, чтобы войти под пользователем. Для просмотра, часов и архивов вход не нужен.</div>'}</article>
+      <article class="card"><h2>Диагностика</h2><div id="st-dyn">${dyn}</div><button id="rd">Определить прибор заново</button></article></div>`;
+    $('#wm').onchange = async e => {
+      const on = e.target.checked;
+      if (on && !await confirmDlg('Разрешить запись', 'Приложение сможет менять параметры и управлять узлом учёта этого прибора. Каждое изменение будет подтверждаться отдельно. Включить?', 'Включить')) { e.target.checked = false; return; }
+      try { await api('device/' + d.id + '/write-mode', { enabled: on }); toast(on ? 'Запись разрешена' : 'Запись выключена'); await refresh(); } catch (x) { toast(x.message, true); e.target.checked = !on; }
+    };
+    const li = $('#lg-in');
+    if (li) {
+      li.onclick = async () => { const j = await callW(d, 'login', { user: +$('#lg-u').value, password: +$('#lg-p').value }); if (j) { $('#lg-p').value = ''; toast(j.level === 2 ? 'Вход выполнен: Наладчик' : j.level === 1 ? 'Вход выполнен: Базовый уровень' : 'Прибор не принял пароль (уровень ' + j.level + ')', j.level !== 2 && j.level !== 1); this.sig = ''; refresh(); } };
+      $('#lg-out').onclick = async () => { const j = await callW(d, 'logout'); if (j) { toast('Сеанс завершён'); this.sig = ''; refresh(); } };
+    }
+    $('#rd').onclick = async () => { await api('device/' + d.id + '/refresh', {}); toast('Прибор будет определён заново'); };
   }
 };
 

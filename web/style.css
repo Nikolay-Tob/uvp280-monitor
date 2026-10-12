@@ -74,3 +74,6 @@ pre.arch{white-space:pre-wrap;word-break:break-word;background:var(--bg);border-
 #toast div.err{background:var(--bad)}
 .dlg{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:8}
 .dlg>div{background:#fff;border-radius:12px;padding:20px;max-width:460px;width:92%;display:flex;flex-direction:column;gap:14px}
+.grid.w{grid-template-columns:repeat(auto-fit,minmax(440px,1fr))}
+td .muted.small{white-space:nowrap}
+label.small{display:flex;align-items:center;gap:6px}

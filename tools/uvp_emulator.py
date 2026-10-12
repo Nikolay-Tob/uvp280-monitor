@@ -48,8 +48,15 @@ def setup():
     put(HR, HRI, 1000, f32(750.06)); put(HR, HRI, 1002, f32(10.0))
     for a, v in ((1010, 0.7), (1012, 0.5), (1014, 1.2), (1016, 0.0)): put(HR, HRI, a, f32(v))
     put(HR, HRI, 1018, [0])
+    import os as _os
+    sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".."))
+    from uvpmon.env_table import ENV_SECTIONS
+    for _t, _rows in ENV_SECTIONS:
+        if "МР113" not in _t and _t not in ("Общие параметры", "Природный газ ГОСТ 30319.2", "Нефть"): continue
+        for _a, _ty, _l, _u in _rows:
+            if _a not in HRI: put(HR, HRI, _a, f32(1.5) if _ty == "float" else [0])
     if NTP:
-        put(HR, HRI, 1005, u32(0xC0A80001)); put(HR, HRI, 1007, [7]); put(HR, HRI, 1008, [2])
+        put(HR, HRI, 1005, u32(0xC0A80001)); put(HR, HRI, 1007, [7]); put(HR, HRI, 1008, [2]); put(HR, HRI, 1009, [0])
     put(HR, HRI, 1806, [0b11001111]); put(HR, HRI, 1807, [123, 729]); put(HR, HRI, 1809, [2011]); HRI[1807] = 1; HRI[1808] = 1
     HRI[1809] = 1; HR[1809] = 2011
     put(HR, HRI, 1810, i32(101006))
@@ -72,6 +79,7 @@ def setup():
     for a in range(8000, 10000): put(HR, HRI, a, [0])
 
 
+TIME_OFF = 0
 OIL = False
 NTP = True
 NIN = 8
@@ -168,6 +176,10 @@ class H(socketserver.BaseRequestHandler):
 
     def written(self, addr):
         hr = self.hr
+        if addr == 1009:
+            v = hr[1009]; v = v - 65536 if v >= 32768 else v
+            global TIME_OFF
+            TIME_OFF += v // 101
         if addr == 202:
             raw = struct.pack(">HH", hr[201], hr[202])
             be = bytes(raw[P32[i]] for i in range(4))
@@ -202,7 +214,7 @@ class H(socketserver.BaseRequestHandler):
         self.s.st = 4 if bad else (2 if 1 <= tp <= 10 else 6)
 
     def refresh(self):
-        n = datetime.datetime.now()
+        n = datetime.datetime.now() + datetime.timedelta(seconds=TIME_OFF)
         for i, v in enumerate((n.day, n.month, n.year % 100 if YEAR2 else n.year, n.hour, n.minute, n.second)):
             self.hr[1800 + i] = v
         if not hasattr(self.hr, "x"): pass
@@ -222,10 +234,10 @@ class Srv(socketserver.ThreadingTCPServer):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=1502); ap.add_argument("--off", type=int, default=0)
     ap.add_argument("--swap", action="store_true"); ap.add_argument("--year2", action="store_true")
-    ap.add_argument("--oil", action="store_true"); ap.add_argument("--inputs", type=int, default=8); ap.add_argument("--no-ntp", action="store_true")
+    ap.add_argument("--oil", action="store_true"); ap.add_argument("--inputs", type=int, default=8); ap.add_argument("--drift", type=int, default=0); ap.add_argument("--no-ntp", action="store_true")
     a = ap.parse_args()
     if a.swap: P32[:] = [2, 3, 0, 1]; P64[:] = [6, 7, 4, 5, 2, 3, 0, 1]
-    NIN = a.inputs; YEAR2 = a.year2; OIL = a.oil; NTP = not a.no_ntp
+    TIME_OFF = a.drift; NIN = a.inputs; YEAR2 = a.year2; OIL = a.oil; NTP = not a.no_ntp
     setup()
     for x in range(1800, 1806): HRI[x] = 1; HR[x] = 0
     s = Srv(("127.0.0.1", a.port), H); s.off = a.off

@@ -67,12 +67,13 @@ class Manager:
         if not (1 <= port <= 65535) or not (0 <= unit <= 255):
             raise ValueError("порт 1..65535, Unit ID 0..255")
         return {"id": keep_id or cfg.get("id") or uuid.uuid4().hex[:8], "name": str(cfg.get("name") or host).strip(),
-                "host": host, "port": port, "unit": unit, "note": str(cfg.get("note", ""))}
+                "host": host, "port": port, "unit": unit, "note": str(cfg.get("note", "")),
+                "write": bool(cfg.get("write", False))}
 
     def cfg_of(self, did):
         d = self.devices[did]
         c = d.cfg
-        return {k: c.get(k) for k in ("id", "name", "host", "port", "unit", "note")}
+        return {k: c.get(k) for k in ("id", "name", "host", "port", "unit", "note", "write")}
 
     def _add(self, cfg):
         cfg = self.clean_cfg(cfg)

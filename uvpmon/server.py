@@ -45,7 +45,7 @@ def device_brief(dev):
                       "p_abs": p.get("p_abs"), "t": p.get("t"), "qv_std": p.get("qv_std"), "qv_wc": p.get("qv_wc"),
                       "q_m": p.get("q_m"), "n_err": p.get("n_err"), "crit": p.get("crit")})
     out = {
-        "id": dev.id, "name": dev.cfg["name"], "host": dev.cfg["host"], "port": dev.cfg["port"], "unit": dev.cfg["unit"],
+        "id": dev.id, "name": dev.cfg["name"], "write": bool(dev.cfg.get("write")), "host": dev.cfg["host"], "port": dev.cfg["port"], "unit": dev.cfg["unit"],
         "online": bool(st.get("online")), "error": st.get("error"), "paused": dev.paused,
         "ms": st.get("ms"), "updated": st.get("updated"), "clock": (st.get("clock") or {}).get("iso"),
         "diff": _diff_sec(st), "errors": errors, "crit": crit, "pipes": pipes,
@@ -225,6 +225,46 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json(dev.read_oil_control() or {})
                     if len(rest) == 3 and rest[1] == "period":
                         return self._json({"scopes": dev.read_oil_period(rest[2])})
+                if rest == ["write-mode"] and method == "POST":
+                    dev.cfg["write"] = bool(self._body().get("enabled"))
+                    m.save()
+                    return self._json({"write": dev.cfg["write"]})
+                if rest == ["env"] and method == "GET":
+                    return self._json({"sections": dev.read_env()})
+                if rest[:1] in (["write"], ["login"], ["logout"], ["time"], ["ntp"]) and method == "POST":
+                    if not dev.cfg.get("write"):
+                        return self._err("запись выключена для этого прибора (включите «Разрешить запись» на вкладке «Настройки»)", 403)
+                    b = self._body()
+                    try:
+                        if rest == ["login"]:
+                            lvl = dev.login(b.get("user"), b.get("password"))
+                            return self._json({"level": lvl, "level_text": R.LEVELS.get(lvl, "?") if lvl is not None else None})
+                        if rest == ["logout"]:
+                            lvl = dev.logout()
+                            return self._json({"level": lvl})
+                        if rest == ["write"]:
+                            done = []
+                            for it in b.get("items", []):
+                                done.append(dev.write_reg(int(it["addr"]), it["value"]))
+                            return self._json({"written": done})
+                        if rest == ["time", "correct"]:
+                            dev.time_correct(b.get("seconds"))
+                            return self._json({"ok": True})
+                        if rest == ["time", "sync-pc"]:
+                            return self._json(dev.time_sync_pc())
+                        if rest == ["ntp", "ip"]:
+                            ip = str(b.get("ip", "")).strip()
+                            parts = ip.split(".")
+                            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                                return self._err("неверный IP-адрес")
+                            v = (int(parts[0]) << 24) | (int(parts[1]) << 16) | (int(parts[2]) << 8) | int(parts[3])
+                            return self._json(dev.write_reg(1005, v))
+                        if rest == ["ntp", "force"]:
+                            return self._json(dev.write_reg(1007, 24680))
+                        if rest == ["ntp", "auto"]:
+                            return self._json(dev.write_reg(1007, 13579))
+                    except PermissionError as e:
+                        return self._err(str(e), 403)
                 if rest == ["archive"] and method == "POST":
                     b = self._body()
                     start = datetime.datetime.fromisoformat(b["start"])

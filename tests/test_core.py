@@ -110,5 +110,38 @@ class DeviceTests(unittest.TestCase):
             emu.stop()
 
 
+class WriteTests(unittest.TestCase):
+    def test_login_env_time_oil(self):
+        emu = Emu("--oil", "--drift", "250")
+        try:
+            d = Device({"id": "x", "host": "127.0.0.1", "port": emu.port, "unit": 1})
+            d.identify()
+            # параметры среды: запись и чтение обратно
+            r = d.write_reg(1000, 750.5)
+            self.assertAlmostEqual(r["value"], 750.5, places=2)
+            env = d.read_env()
+            self.assertTrue(any(sec["title"] == "Нефть" for sec in env))
+            # запрещённый регистр
+            with self.assertRaises(ValueError):
+                d.write_reg(1806, 1)
+            # управление нефтью без входа - отказ
+            d.read_level()
+            with self.assertRaises(PermissionError):
+                d.write_reg(17100, 2)
+            # вход под пользователем 1 (эмулятор: пароль 12345)
+            self.assertEqual(d.login(1, 12345), 2)
+            d.write_reg(17100, 2)
+            self.assertEqual(d.read_oil_control()["line_mask"], 2)
+            self.assertEqual(d.logout(), 1)
+            # подвод часов: дрейф 250 с -> несколько шагов
+            res = d.time_sync_pc()
+            self.assertTrue(res["ok"], res)
+            self.assertGreaterEqual(len(res["steps"]), 3)
+            with self.assertRaises(ValueError):
+                d.write_reg(1007, 5)
+        finally:
+            emu.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

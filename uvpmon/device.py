@@ -410,6 +410,139 @@ class Device:
             res["items"] = parse_archive(txt)
         return res
 
+    # ------------------------------------------------------------------ запись
+    def read_level(self):
+        r = self._try(3, R.HR_LEVEL, 1)
+        return r[0] if r else None
+
+    def login(self, user, password):
+        """Вход: HR200 - номер пользователя, HR201 - пароль (int32). Состояние входа общее для соединений прибора."""
+        user, password = int(user), int(password)
+        if not 1 <= user <= 5:
+            raise ValueError("номер пользователя 1..5")
+        if not 0 < password <= 2147483647:
+            raise ValueError("пароль - целое число до 2147483647")
+        c = self.client
+        c.write(R.HR_USER, [user])
+        try:
+            c.write(R.HR_PASSWORD, self.codec.enc_i32(password))
+        except LinkError:
+            pass            # часть приборов закрывает соединение сразу после записи пароля
+        time.sleep(0.3)
+        level = None
+        for _ in range(3):
+            try:
+                level = self.read_level()
+                break
+            except LinkError:
+                time.sleep(0.5)
+        return level
+
+    def logout(self):
+        try:
+            self.client.write(R.HR_PASSWORD, self.codec.enc_i32(0))
+        except LinkError:
+            pass
+        time.sleep(0.3)
+        try:
+            return self.read_level()
+        except LinkError:
+            return None
+
+    def _encode(self, typ, value):
+        t = typ.lower()
+        if t in ("int16", "uint16"):
+            v = int(round(float(value)))
+            lo, hi = (-32768, 32767) if t == "int16" else (0, 65535)
+            if not lo <= v <= hi:
+                raise ValueError("значение вне диапазона %d..%d" % (lo, hi))
+            return [v & 0xFFFF]
+        if t == "int32":
+            return self.codec.enc_i32(int(round(float(value))))
+        if t == "uint32":
+            v = int(round(float(value)))
+            if not 0 <= v <= 0xFFFFFFFF:
+                raise ValueError("значение вне диапазона")
+            return self.codec.enc_u32(v)
+        if t == "float":
+            return self.codec.enc_f32(float(value))
+        raise ValueError(typ)
+
+    def write_reg(self, addr, value):
+        """Запись одного параметра из белого списка с проверкой уровня доступа и чтением обратно."""
+        from . import writes as W
+        d = W.describe(addr)
+        if d is None:
+            raise ValueError("запись в регистр %d не предусмотрена" % addr)
+        typ, cls, label = d
+        if addr == 1007 and int(value) not in W.TIME_COMMANDS:
+            raise ValueError("недопустимая команда")
+        if addr == 18006 and int(value) not in W.KMH_COMMANDS:
+            raise ValueError("недопустимая команда КМХ")
+        if addr == 1009 and not -9999 <= int(value) <= 9999:
+            raise ValueError("недопустимая поправка")
+        if cls == "oil":
+            lvl = self.read_level()
+            if lvl != 2:
+                raise PermissionError("для управления узлом учёта нужен вход под пользователем с уровнем «Наладчик»")
+        regs = self._encode(typ, value)
+        try:
+            self.client.write(addr, regs)
+        except ModbusError as e:
+            raise PermissionError("прибор отклонил запись (ошибка Modbus %d)%s" % (
+                e.code, ": занят, повторите позже" if e.code == 6 else ": проверьте уровень доступа и ключ безопасности" if e.code in (3, 4) else ""))
+        back = None
+        if addr not in (1007, 1009, 18006):
+            r = self._try(3, addr, len(regs))
+            if r is not None:
+                back = clean(self.codec.by_type(typ, r, 0))
+        return {"addr": addr, "label": label, "value": back}
+
+    def read_env(self):
+        """Параметры среды: только те разделы, которые прибор отдаёт."""
+        from .env_table import ENV_SECTIONS
+        from .oil_table import OIL_TABLE  # noqa
+        out = []
+        for title, rows in ENV_SECTIONS:
+            items = []
+            for addr, typ, label, unit in rows:
+                n = {"float": 2, "int16": 1}[typ]
+                r = self._try(3, addr, n)
+                if r is None:
+                    continue
+                v = self.codec.f32(r) if typ == "float" else s16(r)
+                items.append({"addr": addr, "type": typ, "label": label, "unit": unit, "value": clean(v),
+                              "ro": "Количество ошибок" in label})
+            if items:
+                out.append({"title": title, "rows": items})
+        return out
+
+    def time_correct(self, seconds):
+        seconds = int(seconds)
+        if seconds == 0 or abs(seconds) > 99:
+            raise ValueError("поправка от 1 до 99 секунд")
+        self.client.write(1009, [(seconds * 101) & 0xFFFF])
+
+    def time_sync_pc(self, max_steps=40):
+        """Подвод часов прибора по времени этого ПК шагами до ±99 с. Возвращает журнал шагов."""
+        log = []
+        for _ in range(max_steps):
+            clk = self.read_clock()
+            pc = datetime.datetime.now()
+            if not clk.get("iso"):
+                raise ValueError("часы прибора не читаются")
+            diff = round((datetime.datetime.fromisoformat(clk["iso"]) - pc).total_seconds())
+            if abs(diff) <= 1:
+                log.append({"diff": diff, "step": 0})
+                return {"ok": True, "diff": diff, "steps": log}
+            if abs(diff) > 3 * 3600:
+                raise ValueError("расхождение больше 3 часов (%d с): подводите время через NTP или на самом приборе" % diff)
+            step = -max(-99, min(99, diff))
+            self.time_correct(step)
+            log.append({"diff": diff, "step": step})
+            time.sleep(1.6)
+        return {"ok": False, "steps": log}
+
     # ------------------------------------------------------------------ сводные снимки
     def poll(self, parts=(), hist_tp=None):
         """Один цикл опроса. parts: подмножество {'ntp','inputs','oil','level'} - что читать сверх часов и трубопроводов."""
