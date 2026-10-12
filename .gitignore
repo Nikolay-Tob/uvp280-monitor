@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+uvp_probe_*.txt
+*.log
+.venv/

@@ -1,0 +1,61 @@
+name: Сборка .exe
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Тесты ядра (эмулятор прибора)
+        run: python -m unittest discover -s tests -v
+
+      - name: Установка PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: Сборка UVP280Monitor.exe
+        run: >
+          pyinstaller --onefile --noconsole --clean
+          --name UVP280Monitor
+          --add-data "web;web"
+          run.py
+
+      - name: Проверка запуска .exe
+        shell: pwsh
+        run: |
+          $cfg = Join-Path $env:RUNNER_TEMP 'devices.json'
+          '{"devices":[]}' | Set-Content $cfg
+          $p = Start-Process -FilePath dist\UVP280Monitor.exe -ArgumentList '--no-window','--port','18765','--config',$cfg -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            try { $r = Invoke-RestMethod http://127.0.0.1:18765/api/ping; if ($r.ok) { $ok = $true; break } } catch {}
+          }
+          $page = (Invoke-WebRequest http://127.0.0.1:18765/ -UseBasicParsing).Content
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok -or $page -notmatch 'УВП-280') { throw 'exe не запустился или не отдаёт интерфейс' }
+          "Размер exe: {0:N1} МБ" -f ((Get-Item dist\UVP280Monitor.exe).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UVP280Monitor
+          path: dist/UVP280Monitor.exe
+
+      - name: Публикация релиза
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/UVP280Monitor.exe
