@@ -40,6 +40,10 @@ def main(argv=None):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     m.start()
     if sys.stdout:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
         print("УВП-280 Монитор %s: %s" % (__version__, url), flush=True)
 
     proc = None

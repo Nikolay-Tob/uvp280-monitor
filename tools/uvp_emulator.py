@@ -2,7 +2,11 @@
 # -*- coding: utf-8 -*-
 """Эмулятор УВП-280.01 по карте регистров (для разработки и проверки без прибора).
    python uvp_emulator.py [--port 1502] [--off 0]   (off: смещение адреса, -1 = нумерация с 1)"""
-import argparse, datetime, socketserver, struct, threading, time
+import argparse, datetime, socketserver, struct, sys, threading, time
+
+for _s in (sys.stdout, sys.stderr):
+    try: _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception: pass
 
 ENC = "cp1251"
 HR, IR = {}, {}          # адрес -> uint16
