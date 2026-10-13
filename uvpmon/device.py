@@ -21,7 +21,7 @@ class Device:
         self.cfg = dict(cfg)
         self.id = cfg["id"]
         self.client = Client(cfg["host"], cfg.get("port", 502), cfg.get("unit", 1),
-                             timeout=cfg.get("timeout", 5.0), delay=cfg.get("delay", 0.01))
+                             timeout=cfg.get("timeout") or 5.0, delay=cfg.get("delay", 0.01))
         self.client.on_reconnect = self._reconnected
         self.codec = Codec()
         self.state_lock = threading.RLock()

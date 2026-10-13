@@ -74,6 +74,7 @@ function parseRoute() {
   if (p[0] === 'd' && p[1]) return { name: 'dev', id: p[1], tab: p[2] || 'main', tp: p[3] ? +p[3] : null };
   if (p[0] === 'devices') return { name: 'devices' };
   if (p[0] === 'units') return { name: 'units' };
+  if (p[0] === 'conn') return { name: 'conn' };
   return { name: 'summary' };
 }
 function go(h) { location.hash = h; }
@@ -104,7 +105,8 @@ function renderNav() {
       <span class="s" style="color:${c === 'ok' ? '#7FD6A3' : c === 'warn' ? '#F2B84B' : '#F59A90'}">${esc(t)}</span></a>`;
   }
   h += `<a class="nav-add" href="#/devices">+ Добавить прибор</a>
-  <a class="nav-i ${r.name === 'units' ? 'on' : ''}" href="#/units"><span class="t">⚙ Единицы измерения</span></a>`;
+  <a class="nav-i ${r.name === 'units' ? 'on' : ''}" href="#/units"><span class="t">⚙ Единицы измерения</span></a>
+  <a class="nav-i ${r.name === 'conn' ? 'on' : ''}" href="#/conn"><span class="t">⚙ Опрос и тайм-ауты</span></a>`;
   const nav = $('#nav');
   if (nav.dataset.sig !== h) { nav.innerHTML = h; nav.dataset.sig = h; }
 }
@@ -144,6 +146,7 @@ const Devices = {
       <label class="f">IP-адрес<input id="f-host" style="width:170px" placeholder="192.168.0.154"></label>
       <label class="f">Порт<input id="f-port" type="number" style="width:90px" value="502"></label>
       <label class="f">Unit ID<input id="f-unit" type="number" style="width:80px" value="1"></label>
+      <label class="f">Тайм-аут, с<input id="f-to" type="number" step="0.5" min="1" max="60" style="width:90px" placeholder="общий"></label>
       <button id="f-test">Проверить связь</button><button class="pri" id="f-save">Добавить</button><button id="f-cancel" hidden>Отмена</button></div>
       <div id="f-res" class="small"></div></div>
     <div class="sw"><table><thead><tr><th>Название</th><th>Адрес</th><th>Состояние</th><th></th></tr></thead><tbody id="dl"></tbody></table></div>`;
@@ -156,8 +159,8 @@ const Devices = {
     $('#file').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const j = JSON.parse(await f.text()); const r = await api('devices/import', { data: j }); toast('Добавлено приборов: ' + r.imported); await refresh(); } catch (x) { toast('Не удалось прочитать файл: ' + x.message, true); } e.target.value = ''; };
     this.update(true);
   },
-  vals() { return { name: $('#f-name').value.trim(), host: $('#f-host').value.trim(), port: +$('#f-port').value || 502, unit: +$('#f-unit').value }; },
-  reset() { this.edit = null; $('#f-name').value = ''; $('#f-host').value = ''; $('#f-port').value = 502; $('#f-unit').value = 1; $('#ftitle').textContent = 'Новый прибор'; $('#f-save').textContent = 'Добавить'; $('#f-cancel').hidden = true; $('#f-res').textContent = ''; },
+  vals() { return { name: $('#f-name').value.trim(), host: $('#f-host').value.trim(), port: +$('#f-port').value || 502, unit: +$('#f-unit').value, timeout: $('#f-to').value ? +$('#f-to').value : null }; },
+  reset() { this.edit = null; $('#f-name').value = ''; $('#f-host').value = ''; $('#f-port').value = 502; $('#f-unit').value = 1; $('#f-to').value = ''; $('#ftitle').textContent = 'Новый прибор'; $('#f-save').textContent = 'Добавить'; $('#f-cancel').hidden = true; $('#f-res').textContent = ''; },
   async save() {
     const v = this.vals();
     try { if (this.edit) await api('device/' + this.edit, v); else await api('devices', v); this.reset(); await refresh(); toast('Сохранено'); } catch (e) { toast(e.message, true); }
@@ -177,7 +180,7 @@ const Devices = {
     tb.innerHTML = S.devices.map(d => { const [c, t] = devStatus(d); return `<tr><td><b>${esc(d.name)}</b></td><td class="mono">${esc(d.host)}:${d.port} · unit ${d.unit}</td><td><span class="pill ${c}">${esc(t)}</span></td>
       <td style="white-space:nowrap"><button data-o="${d.id}">Открыть</button> <button data-e="${d.id}">Изменить</button> <button class="dng" data-d="${d.id}">Удалить</button></td></tr>`; }).join('') || '<tr><td colspan="4" class="muted">Приборов нет — добавьте первый выше.</td></tr>';
     tb.querySelectorAll('[data-o]').forEach(b => b.onclick = () => go('#/d/' + b.dataset.o + '/main'));
-    tb.querySelectorAll('[data-e]').forEach(b => b.onclick = () => { const d = S.devices.find(x => x.id === b.dataset.e); this.edit = d.id; $('#f-name').value = d.name; $('#f-host').value = d.host; $('#f-port').value = d.port; $('#f-unit').value = d.unit; $('#ftitle').textContent = 'Изменить прибор'; $('#f-save').textContent = 'Сохранить'; $('#f-cancel').hidden = false; window.scrollTo(0, 0); });
+    tb.querySelectorAll('[data-e]').forEach(b => b.onclick = () => { const d = S.devices.find(x => x.id === b.dataset.e); this.edit = d.id; $('#f-name').value = d.name; $('#f-host').value = d.host; $('#f-port').value = d.port; $('#f-unit').value = d.unit; $('#f-to').value = d.timeout || ''; $('#ftitle').textContent = 'Изменить прибор'; $('#f-save').textContent = 'Сохранить'; $('#f-cancel').hidden = false; window.scrollTo(0, 0); });
     tb.querySelectorAll('[data-d]').forEach(b => b.onclick = async () => { const d = S.devices.find(x => x.id === b.dataset.d); if (!confirm('Удалить «' + d.name + '» из списка?')) return; try { await api('device/' + d.id + '/delete', {}); await refresh(); } catch (e) { toast(e.message, true); } });
   }
 };
@@ -190,6 +193,35 @@ const Units = {
     <div class="card"><div class="frm">${Object.entries(UNITS).map(([k, u]) => `<label class="f">${u.title}<select data-q="${k}">${u.list.map(x => `<option ${(s[k] || u.def) === x[0] ? 'selected' : ''}>${x[0]}</option>`).join('')}</select></label>`).join('')}</div>
     <div class="small muted">Настройка хранится в этом окне и применяется сразу ко всем приборам. Величины, выдаваемые прибором в своих единицах (датчики, итоги СИКН, архивы), показываются как есть.</div></div>`;
     root.querySelectorAll('select').forEach(sel => sel.onchange = () => { const c = store('units') || {}; c[sel.dataset.q] = sel.value; store('units', c); toast('Сохранено'); });
+  },
+  update() { }
+};
+
+/* ---------------- опрос и тайм-ауты ---------------- */
+const ConnSettings = {
+  FIELDS: [
+    ['sel_interval', 'Период опроса выбранного прибора, с', 'Как часто обновляются данные открытого прибора.', 0.5],
+    ['bg_interval', 'Период опроса остальных приборов, с', 'Для сводки и боковой панели.', 1],
+    ['timeout', 'Тайм-аут ответа, с', 'Сколько ждать ответа на один запрос. Для медленных каналов (радио, GPRS) увеличьте.', 0.5],
+    ['delay_ms', 'Пауза между запросами, мс', 'Снижает нагрузку на прибор. При ошибках «занят» увеличьте.', 5],
+    ['attempts', 'Число попыток при сбое', 'Повторы запроса с переподключением до признания связи потерянной.', 1],
+  ],
+  mount(root) {
+    root.innerHTML = `<div class="hdr"><div><h1>Опрос и тайм-ауты</h1><div class="meta">Общие настройки для всех приборов. Применяются сразу. Для отдельного прибора тайм-аут можно задать в списке приборов.</div></div></div>
+      <div class="card"><div class="frm" id="cs-f" style="align-items:flex-start"></div><div class="frm"><button class="pri" id="cs-save">Сохранить</button><button id="cs-def">Вернуть по умолчанию</button></div><div class="small muted" id="cs-note"></div></div>`;
+    this.load();
+    $('#cs-save').onclick = () => this.save();
+    $('#cs-def').onclick = () => { for (const [k] of this.FIELDS) $('#cs-' + k).value = this.defs[k]; };
+  },
+  async load() {
+    try {
+      const j = await api('settings'); this.defs = j.defaults; this.lim = j.limits;
+      $('#cs-f').innerHTML = this.FIELDS.map(([k, t, h, st]) => `<label class="f" style="width:300px">${t}<input type="number" id="cs-${k}" step="${st}" min="${j.limits[k][0]}" max="${j.limits[k][1]}" value="${j.settings[k]}"><span class="small">${h} (${j.limits[k][0]}…${j.limits[k][1]})</span></label>`).join('');
+    } catch (e) { toast(e.message, true); }
+  },
+  async save() {
+    const b = {}; for (const [k] of this.FIELDS) b[k] = $('#cs-' + k).value;
+    try { await api('settings', b); toast('Сохранено'); await refresh(); } catch (e) { toast(e.message, true); }
   },
   update() { }
 };
@@ -606,7 +638,7 @@ DevTabs.settings = {
 /* ---------------- ядро: маршрутизация и обновление ---------------- */
 async function refresh() {
   try {
-    const j = await api('devices'); S.devices = j.devices; S.version = j.version; $('#ver').textContent = 'версия ' + j.version;
+    const j = await api('devices'); S.devices = j.devices; S.version = j.version; $('#ver').textContent = 'версия ' + j.version; if (j.settings) $('#poll-note').textContent = 'Опрос выбранного прибора — каждые ' + j.settings.sel_interval + ' с, остальных — раз в ' + j.settings.bg_interval + ' с.';
   } catch (e) { return; }
   const r = S.route;
   if (r.name === 'dev') { try { S.dev = await api('device/' + encodeURIComponent(r.id)); } catch (e) { S.dev = null; } } else S.dev = null;
@@ -622,6 +654,7 @@ async function route() {
   if (r.name === 'summary') { S.screen = Summary; Summary.mount(root); api('select', { id: null }).catch(() => { }); }
   else if (r.name === 'devices') { S.screen = Devices; Devices.mount(root); api('select', { id: null }).catch(() => { }); }
   else if (r.name === 'units') { S.screen = Units; Units.mount(root); }
+  else if (r.name === 'conn') { S.screen = ConnSettings; ConnSettings.mount(root); }
   else { S.screen = Dev; Dev.mount(root, r); api('select', { id: r.id, tab: r.tab, tp: r.tp }).catch(() => { }); }
   await refresh();
 }

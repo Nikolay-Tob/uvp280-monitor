@@ -46,7 +46,7 @@ def device_brief(dev):
                       "q_m": p.get("q_m"), "n_err": p.get("n_err"), "crit": p.get("crit")})
     out = {
         "id": dev.id, "name": dev.cfg["name"], "write": bool(dev.cfg.get("write")), "host": dev.cfg["host"], "port": dev.cfg["port"], "unit": dev.cfg["unit"],
-        "online": bool(st.get("online")), "error": st.get("error"), "paused": dev.paused,
+        "timeout": dev.cfg.get("timeout"), "online": bool(st.get("online")), "error": st.get("error"), "paused": dev.paused,
         "ms": st.get("ms"), "updated": st.get("updated"), "clock": (st.get("clock") or {}).get("iso"),
         "diff": _diff_sec(st), "errors": errors, "crit": crit, "pipes": pipes,
         "serial": dev.info.get("serial"), "fw": dev.info.get("fw"), "oil": bool(dev.caps.get("oil")),
@@ -166,7 +166,15 @@ class Handler(BaseHTTPRequestHandler):
                 with m.lock:
                     ids = list(m.order)
                 return self._json({"devices": [device_brief(m.devices[i]) for i in ids], "selected": m.selected,
-                                   "version": __version__})
+                                   "version": __version__, "settings": m.settings})
+            if parts == ["settings"]:
+                if method == "POST":
+                    try:
+                        m.set_settings(self._body())
+                    except ValueError as e:
+                        return self._err(str(e))
+                from .manager import DEFAULT_SETTINGS, SETTINGS_LIMITS
+                return self._json({"settings": m.settings, "defaults": DEFAULT_SETTINGS, "limits": SETTINGS_LIMITS})
             if parts == ["devices"] and method == "POST":
                 b = self._body()
                 try:

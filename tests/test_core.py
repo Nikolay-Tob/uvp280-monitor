@@ -143,5 +143,25 @@ class WriteTests(unittest.TestCase):
             emu.stop()
 
 
+class SettingsTests(unittest.TestCase):
+    def test_settings_roundtrip(self):
+        import tempfile
+        from uvpmon.manager import Manager
+        path = os.path.join(tempfile.mkdtemp(), "devices.json")
+        m = Manager(path)
+        did = m.add({"name": "t", "host": "127.0.0.1", "port": 1502, "unit": 1})
+        m.set_settings({"sel_interval": 3, "bg_interval": 20, "timeout": 8, "delay_ms": 50, "attempts": 2})
+        c = m.devices[did].client
+        self.assertEqual((c.timeout, c.attempts), (8.0, 2))
+        self.assertAlmostEqual(c.delay, 0.05)
+        m.update(did, {"name": "t", "host": "127.0.0.1", "port": 1502, "unit": 1, "timeout": 20})
+        self.assertEqual(m.devices[did].client.timeout, 20.0)
+        with self.assertRaises(ValueError):
+            m.set_settings({"timeout": 500})
+        m2 = Manager(path)
+        self.assertEqual(m2.settings["bg_interval"], 20.0)
+        self.assertEqual(m2.devices[did].client.timeout, 20.0)
+
+
 if __name__ == "__main__":
     unittest.main()

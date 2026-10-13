@@ -20,9 +20,12 @@ def data_dir():
     return d
 
 
+DEFAULT_SETTINGS = {"sel_interval": 2.0, "bg_interval": 10.0, "timeout": 5.0, "delay_ms": 10, "attempts": 3}
+SETTINGS_LIMITS = {"sel_interval": (0.5, 60.0), "bg_interval": (2.0, 600.0), "timeout": (1.0, 60.0),
+                   "delay_ms": (0, 1000), "attempts": (1, 6)}
+
+
 class Manager:
-    SEL_INTERVAL = 2.0
-    BG_INTERVAL = 10.0
 
     def __init__(self, path=None):
         self.path = path or os.path.join(data_dir(), "devices.json")
@@ -34,6 +37,7 @@ class Manager:
         self.stop = threading.Event()
         self.threads = {}
         self.enrich_jobs = {}
+        self.settings = dict(DEFAULT_SETTINGS)
         self.load()
 
     # ---------------------------------------------------------------- хранение
@@ -43,16 +47,53 @@ class Manager:
                 data = json.load(f)
         except (OSError, ValueError):
             data = {"devices": []}
+        try:
+            self.settings = self.clean_settings(data.get("settings") or {})
+        except ValueError:
+            self.settings = dict(DEFAULT_SETTINGS)
         for cfg in data.get("devices", []):
             self._add(cfg)
 
     def save(self):
         with self.lock:
-            data = {"devices": [self.cfg_of(i) for i in self.order]}
+            data = {"devices": [self.cfg_of(i) for i in self.order], "settings": self.settings}
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
+
+    @staticmethod
+    def clean_settings(src):
+        out = dict(DEFAULT_SETTINGS)
+        for k, (lo, hi) in SETTINGS_LIMITS.items():
+            if k in src and src[k] not in (None, ""):
+                try:
+                    v = float(src[k])
+                except (TypeError, ValueError):
+                    raise ValueError("неверное значение: %s" % k)
+                if not lo <= v <= hi:
+                    raise ValueError("%s: допустимо от %g до %g" % (k, lo, hi))
+                out[k] = int(v) if k in ("delay_ms", "attempts") else v
+        return out
+
+    def set_settings(self, src):
+        self.settings = self.clean_settings(src)
+        with self.lock:
+            for dev in self.devices.values():
+                self.apply(dev)
+        self.save()
+
+    def apply(self, dev):
+        c = dev.client
+        t = dev.cfg.get("timeout")
+        c.timeout = float(t) if t else float(self.settings["timeout"])
+        c.delay = self.settings["delay_ms"] / 1000.0
+        c.attempts = int(self.settings["attempts"])
+        if c.sock is not None:
+            try:
+                c.sock.settimeout(c.timeout)
+            except OSError:
+                pass
 
     @staticmethod
     def clean_cfg(cfg, keep_id=None):
@@ -62,18 +103,25 @@ class Manager:
         except (TypeError, ValueError):
             raise ValueError("порт и Unit ID должны быть числами")
         host = str(cfg.get("host", "")).strip()
+        try:
+            to = cfg.get("timeout")
+            to = float(to) if to not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            raise ValueError("таймаут должен быть числом")
+        if to is not None and not 1 <= to <= 60:
+            raise ValueError("таймаут от 1 до 60 с")
         if not host:
             raise ValueError("не указан адрес")
         if not (1 <= port <= 65535) or not (0 <= unit <= 255):
             raise ValueError("порт 1..65535, Unit ID 0..255")
         return {"id": keep_id or cfg.get("id") or uuid.uuid4().hex[:8], "name": str(cfg.get("name") or host).strip(),
                 "host": host, "port": port, "unit": unit, "note": str(cfg.get("note", "")),
-                "write": bool(cfg.get("write", False))}
+                "write": bool(cfg.get("write", False)), "timeout": to}
 
     def cfg_of(self, did):
         d = self.devices[did]
         c = d.cfg
-        return {k: c.get(k) for k in ("id", "name", "host", "port", "unit", "note", "write")}
+        return {k: c.get(k) for k in ("id", "name", "host", "port", "unit", "note", "write", "timeout")}
 
     def _add(self, cfg):
         cfg = self.clean_cfg(cfg)
@@ -81,6 +129,7 @@ class Manager:
             while cfg["id"] in self.devices:
                 cfg["id"] = uuid.uuid4().hex[:8]
             dev = Device(cfg)
+            self.apply(dev)
             self.devices[cfg["id"]] = dev
             self.order.append(cfg["id"])
         if self.threads is not None and not self.stop.is_set() and getattr(self, "started", False):
@@ -98,6 +147,7 @@ class Manager:
             new = self.clean_cfg(cfg, keep_id=did)
             changed = any(old.cfg.get(k) != new[k] for k in ("host", "port", "unit"))
             old.cfg.update(new)
+            self.apply(old)
             if changed:
                 old.client.host, old.client.port, old.client.unit = new["host"], new["port"], new["unit"]
                 old.identified = False
@@ -170,12 +220,13 @@ class Manager:
                 ok = dev.poll(parts, hist)
                 if ok and self.selected == dev.id and self.view.get("tab") in ("sensors", "pipes"):
                     self._maybe_enrich(dev)
-            interval = self.SEL_INTERVAL if self.selected == dev.id else self.BG_INTERVAL
+            sel, bg = self.settings["sel_interval"], self.settings["bg_interval"]
+            interval = sel if self.selected == dev.id else bg
             if not dev.state.get("online") and dev.identified is False:
                 interval = max(interval, 5.0)
             while time.time() - t0 < interval and not self.stop.is_set():
                 time.sleep(0.2)
-                if self.selected == dev.id and time.time() - t0 > self.SEL_INTERVAL:
+                if self.selected == dev.id and time.time() - t0 > self.settings["sel_interval"]:
                     break
 
     # ---------------------------------------------------------------- карта параметров в фоне
